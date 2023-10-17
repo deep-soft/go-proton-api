@@ -233,3 +233,95 @@ SGVsbG8gQXR0YWNobWVudA==
 		require.Equal(t, "Hello Attachment", dec.GetString())
 	}
 }
+
+func TestEncryptMessage_Inline(t *testing.T) {
+	const message = `From: Nathaniel Borenstein <nsb@bellcore.com>
+To:  Ned Freed <ned@innosoft.com>
+Subject: Sample message (import inline)
+MIME-Version: 1.0
+Content-type: multipart/mixed; boundary="BOUNDARY"
+
+--BOUNDARY
+Content-type: text/plain; charset=us-ascii
+
+Hello world
+--BOUNDARY
+Content-Type: image/gif; name="email-action-left.gif"
+Content-Transfer-Encoding: base64
+Content-ID: <part1.D96BFAE9.E2E1CAE3@protonmail.com>
+Content-Disposition: inline; filename="email-action-left.gif"
+
+SGVsbG8gQXR0YWNobWVudA==
+--simple boundary--
+`
+	key, err := crypto.GenerateKey("foobar", "foo@bar.com", "x25519", 0)
+	require.NoError(t, err)
+
+	kr, err := crypto.NewKeyRing(key)
+	require.NoError(t, err)
+
+	encryptedMessage, err := proton.EncryptRFC822(kr, []byte(message))
+	require.NoError(t, err)
+
+	section := rfc822.Parse(encryptedMessage)
+
+	{
+		// Check root header:
+		header, err := section.ParseHeader()
+		require.NoError(t, err)
+
+		assert.Equal(t, "Nathaniel Borenstein <nsb@bellcore.com>", header.Get("From"))
+		assert.Equal(t, "Ned Freed <ned@innosoft.com>", header.Get("To"))
+		assert.Equal(t, "Sample message (import inline)", header.Get("Subject"))
+		assert.Equal(t, "1.0", header.Get("MIME-Version"))
+
+		mediaType, params, err := rfc822.ParseMediaType(header.Get("Content-Type"))
+		require.NoError(t, err)
+		assert.Equal(t, "multipart/mixed", mediaType)
+		assert.NotEmpty(t, params["boundary"])
+	}
+
+	children, err := section.Children()
+	require.NoError(t, err)
+	require.Equal(t, 2, len(children))
+
+	{
+		// check first child.
+		child := children[0]
+		header, err := child.ParseHeader()
+		require.NoError(t, err)
+
+		header.Entries(func(key, value string) {
+			// Old header should be deleted.
+			assert.NotEqual(t, "Content-type", key)
+			assert.NotEqual(t, "text/plain; charset=us-ascii", value)
+		})
+
+		assert.Equal(t, "text/plain; charset=utf-8", header.Get("Content-Type"))
+	}
+
+	{
+		// check second child.
+		child := children[1]
+		header, err := child.ParseHeader()
+		require.NoError(t, err)
+
+		assert.Equal(t, "base64", header.Get("Content-Transfer-Encoding"))
+		assert.Equal(t, `inline; filename="email-action-left.gif"`, header.Get("Content-Disposition"))
+		assert.Equal(t, `image/gif; name="email-action-left.gif"`, header.Get("Content-type"))
+
+		body := child.Body()
+
+		// Read the body.
+		bodyDecoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(body)))
+		require.NoError(t, err)
+
+		// Unarmor the PGP message.
+		enc := crypto.NewPGPMessage(bodyDecoded)
+
+		// Decrypt the PGP message.
+		dec, err := kr.Decrypt(enc, nil, crypto.GetUnixTime())
+		require.NoError(t, err)
+		require.Equal(t, "Hello Attachment", dec.GetString())
+	}
+}
